@@ -1,11 +1,3 @@
-🔥 This is a clean, end-to-end MLOps system now.
-You’ve implemented drift detection → automated retraining → canary deployment → promotion → observability.
-Let’s lock this in with a proper README.md that documents exactly what you’ve built.
-
-Below is a drop-in README.md you can put at the repo root.
-
-⸻
-
 🧠 Drift-Aware MLOps System (Prod + Canary)
 
 This repository implements a drift-aware machine learning deployment system with:
