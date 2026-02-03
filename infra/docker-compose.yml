@@ -1,0 +1,173 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: mlops_postgres
+    environment:
+      POSTGRES_USER: mlflow
+      POSTGRES_PASSWORD: mlflow
+      POSTGRES_DB: mlflow
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mlflow -d mlflow"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  minio:
+    image: minio/minio:RELEASE.2025-01-20T14-49-07Z
+    container_name: mlops_minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minio
+      MINIO_ROOT_PASSWORD: minio12345
+    ports:
+      - "9000:9000"   # S3 API
+      - "9001:9001"   # MinIO Console UI
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  # Creates the bucket we'll use for MLflow artifacts + drift reports
+  minio_init:
+    image: minio/mc:RELEASE.2025-01-17T23-25-50Z
+    container_name: mlops_minio_init
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 minio minio12345 &&
+      mc mb -p local/mlflow || true &&
+      mc anonymous set download local/mlflow || true &&
+      echo 'MinIO bucket ready: s3://mlflow' "
+    restart: "no"
+
+  mlflow:
+    build:
+      context: .
+      dockerfile: mlflow/Dockerfile
+    image: mlops-mlflow:2.14.2
+    container_name: mlops_mlflow
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio_init:
+        condition: service_completed_successfully
+    environment:
+      AWS_ACCESS_KEY_ID: minio
+      AWS_SECRET_ACCESS_KEY: minio12345
+      MLFLOW_S3_ENDPOINT_URL: http://minio:9000
+      AWS_DEFAULT_REGION: us-east-1
+    ports:
+      - "5050:5000"
+    command: >
+      mlflow server
+      --host 0.0.0.0
+      --port 5000
+      --backend-store-uri postgresql://mlflow:mlflow@postgres:5432/mlflow
+      --artifacts-destination s3://mlflow
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  inference_prod:
+    build: ../services/inference
+    container_name: mlops_inference_prod
+    depends_on:
+      mlflow:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    environment:
+      MLFLOW_TRACKING_URI: http://mlops_mlflow:5000
+      AWS_ACCESS_KEY_ID: minio
+      AWS_SECRET_ACCESS_KEY: minio12345
+      S3_ENDPOINT_URL: http://minio:9000
+      DRIFT_BUCKET: mlflow
+      DEPLOYMENT: prod
+
+      MODEL_NAME: DriftAwareDemoModel
+      MODEL_STAGE: Production
+      PG_HOST: mlops_postgres
+      PG_PORT: 5432
+      PG_DB: mlflow
+      PG_USER: mlflow
+      PG_PASSWORD: mlflow
+    ports:
+      - "8001:8000"
+
+  inference_canary:
+    build: ../services/inference
+    container_name: mlops_inference_canary
+    depends_on:
+      mlflow:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    environment:
+      MLFLOW_TRACKING_URI: http://mlops_mlflow:5000
+      AWS_ACCESS_KEY_ID: minio
+      AWS_SECRET_ACCESS_KEY: minio12345
+      S3_ENDPOINT_URL: http://minio:9000
+      DRIFT_BUCKET: mlflow
+      DEPLOYMENT: canary
+
+      MODEL_NAME: DriftAwareDemoModel
+      MODEL_STAGE: Staging
+      PG_HOST: mlops_postgres
+      PG_PORT: 5432
+      PG_DB: mlflow
+      PG_USER: mlflow
+      PG_PASSWORD: mlflow
+    ports:
+      - "8002:8000"
+  
+  inference:
+    build:
+      context: ../services/inference
+    container_name: mlops_inference
+    depends_on:
+      mlflow:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    environment:
+      MLFLOW_TRACKING_URI: http://mlops_mlflow:5000
+      MODEL_NAME: DriftAwareDemoModel
+      MODEL_STAGE: Production
+      PG_HOST: mlops_postgres
+      PG_PORT: "5432"
+      PG_DB: mlflow
+      PG_USER: mlflow
+      PG_PASSWORD: mlflow
+      AWS_ACCESS_KEY_ID: minio
+      AWS_SECRET_ACCESS_KEY: minio12345
+      MLFLOW_S3_ENDPOINT_URL: http://mlops_minio:9000
+      AWS_DEFAULT_REGION: us-east-1
+    ports:
+      - "8000:8000"
+
+  # Optional: DB UI in browser at http://localhost:8080
+  adminer:
+    image: adminer:4
+    container_name: mlops_adminer
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+
+volumes:
+  postgres_data:
+  minio_data:
